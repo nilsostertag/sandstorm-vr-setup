@@ -1,10 +1,9 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    process::{Command, Child, exit},
-    time::{Instant, Duration},
-    thread,
+    process::{Command, Child},
     os::windows::ffi::OsStrExt,
+    error::Error,
 };
 use widestring::U16CString;
 
@@ -15,37 +14,58 @@ use windows::{
         UI::Shell::{IShellLinkW, ShellLink},
     },
 };
-use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
+use sysinfo::{Pid, RefreshKind, System};
+use serde::Deserialize;
+
+// Struktur für die JSON
+#[derive(Deserialize)]
+struct Config {
+    sandstorm_dir: String,
+    uevr_path: String,
+}
+
 
 fn main() {
     println!("[*] start");
+    println!("[*] reading config");
+    let config = load_config().expect("Failed to load configuration file.");
 
-    let mut renamed = false;
-    let mut copied = false;
+    let sandstorm_dir: &str = &config.sandstorm_dir;
+    let uevr_path: &str = &config.uevr_path;
 
-    if let Err(e) = env::set_current_dir("E:\\SteamLibrary\\steamapps\\common\\sandstorm") {
+    let mut _uevr: Child = match Command::new("cmd")
+        .args(["/C", "start", "", uevr_path])
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[!] failed to start UEVR_Injector: {e}");
+            rollback();
+            return;
+        }
+    };
+
+    if let Err(e) = env::set_current_dir(sandstorm_dir) {
         eprintln!("[!] failed to enter workingdir: {e}");
         return;
     }
-    println!("[+] cd workingdir");
+    println!("[+] enter working directory");
 
     // rename + copy
     if Path::new("InsurgencyEAC.exe").exists() {
         if let Err(e) = fs::rename("InsurgencyEAC.exe", "InsurgencyEACg.exe") {
             eprintln!("[!] rename failed: {e}");
-            rollback(renamed, copied);
+            rollback();
             return;
         }
-        renamed = true;
         println!("[+] InsurgencyEAC.exe -> InsurgencyEACg.exe");
     }
 
     if let Err(e) = fs::copy("Insurgency.exe", "InsurgencyEAC.exe") {
         eprintln!("[!] copy failed: {e}");
-        rollback(renamed, copied);
+        rollback();
         return;
     }
-    copied = true;
     println!("[+] Insurgency.exe -> InsurgencyEAC.exe");
 
     // Shortcut erstellen & Desktop
@@ -60,9 +80,6 @@ fn main() {
         }
     };
 
-    //Prüfen, wie weit der code fehlerfrei läuft
-    //exit(0);
-
     // Spiel starten über Shortcut
     let mut _child: Child = match Command::new("cmd")
         .args(["/C", "start", "", &shortcut.to_string_lossy()])
@@ -71,7 +88,7 @@ fn main() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("[!] failed to start game via shortcut: {e}");
-            rollback(renamed, copied);
+            rollback();
             return;
         }
     };
@@ -102,12 +119,12 @@ fn main() {
         println!("[*] Attaching to process pid={pid}");
     } else {
         eprintln!("[!] Failed to find `{target_name}` after 30s");
-        rollback(renamed, copied);
+        rollback();
         return;
     }
     // Watchdog-Schleife: überwacht das Insurgency-Process
     if let Some(pid) = game_pid {
-        let pid = Pid::from_u32(pid); // sysinfo benötigt Pid-Typ
+        let pid = Pid::from_u32(pid);
 
         println!("[*] Monitoring Insurgency process...");
 
@@ -118,7 +135,7 @@ fn main() {
         // Prüfen, ob der Prozess noch existiert
         if sys.process(pid).is_none() {
             println!("[!] Insurgency has exited or lost connection, performing rollback...");
-            rollback(renamed, copied);
+            rollback();
             println!("[*] Exiting script.");
             return;
         }
@@ -127,16 +144,32 @@ fn main() {
     }
 }
 
-fn rollback(renamed: bool, copied: bool) {
+fn load_config() -> Result<Config, Box<dyn Error>> {
+    let exe_path = std::env::current_exe()?;
+    let exe_dir = exe_path
+        .parent()
+        .ok_or("Failed to get exe directory")?;
+    let config_path = exe_dir.join("sandstorm_vr_setup.json");
+
+    let content = fs::read_to_string(config_path)?;
+    let config: Config = serde_json::from_str(&content)?;
+
+    Ok(config)
+}
+
+fn rollback() {
     println!("[*] rollback");
     let _ = fs::rename("InsurgencyEAC.exe", "DELETE.exe");
+    std::thread::sleep(std::time::Duration::from_secs(1));
     let _ = fs::rename("InsurgencyEACg.exe", "InsurgencyEAC.exe");
     let _ = fs::remove_file("DELETE.exe");
     let __ = fs::remove_file("InsurgencyVR.exe.lnk");
-
+    
+    std::thread::sleep(std::time::Duration::from_secs(1));
     println!("    removed InsurgencyEAC.exe");
     println!("    restored InsurgencyEAC.exe from archive");
     println!("[*] rollback finished");
+    std::thread::sleep(std::time::Duration::from_secs(1));
 }
 
 pub fn create_and_copy_shortcut() -> windows::core::Result<PathBuf> {
