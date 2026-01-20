@@ -2,19 +2,20 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::{Command, Child, exit},
+    time::{Instant, Duration},
     thread,
-    time::{Duration, Instant},
     os::windows::ffi::OsStrExt,
 };
 use widestring::U16CString;
 
 use windows::{
-    core::{PCWSTR, Interface, HRESULT},
+    core::{PCWSTR, Interface},
     Win32::{
         System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, CLSCTX_INPROC_SERVER, IPersistFile},
         UI::Shell::{IShellLinkW, ShellLink},
     },
 };
+use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 
 fn main() {
     println!("[*] start");
@@ -63,7 +64,7 @@ fn main() {
     //exit(0);
 
     // Spiel starten über Shortcut
-    let mut child: Child = match Command::new("cmd")
+    let mut _child: Child = match Command::new("cmd")
         .args(["/C", "start", "", &shortcut.to_string_lossy()])
         .spawn()
     {
@@ -75,51 +76,67 @@ fn main() {
         }
     };
 
-    let pid = child.id();
-    println!("[+] Game started via shortcut (pid={pid})");
+    let target_name = "InsurgencyClient-Win64-Shipping.exe";
+    let mut sys = System::new_with_specifics(RefreshKind::everything());
+    let mut game_pid: Option<u32> = None;
 
-    let start_time = Instant::now();
-    for sec in 1..=30 {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let elapsed = start_time.elapsed().as_secs();
-                println!("[!] process exited early: {status} (attached {elapsed}s)");
-                rollback(renamed, copied);
-                return;
-            }
-            Ok(None) => {
-                let elapsed = start_time.elapsed().as_secs();
-                println!("[*] {sec}s waiting, total attached: {elapsed}s");
-            }
-            Err(e) => {
-                let elapsed = start_time.elapsed().as_secs();
-                eprintln!("[!] wait error: {e} (attached {elapsed}s)");
-                rollback(renamed, copied);
-                return;
-            }
+    std::thread::sleep(std::time::Duration::from_secs(10));
+
+    for _ in 0..30 {
+        println!("[+] Looking for target process `{target_name}`");
+        print!(".");
+        sys.refresh_specifics(RefreshKind::everything());
+        // Search for the target process
+        if let Some((pid, _process)) = sys.processes()
+            .iter()
+            .find(|(_, process)| process.name().eq_ignore_ascii_case(target_name))
+        {
+            game_pid = Some(pid.as_u32()); // `.as_u32()` gives u32
+            println!("[+] Found target process `{target_name}` (pid={})", pid.as_u32());
+            break;
         }
-        thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(std::time::Duration::from_secs(1));
     }
+    
+    if let Some(pid) = game_pid {
+        println!("[*] Attaching to process pid={pid}");
+    } else {
+        eprintln!("[!] Failed to find `{target_name}` after 30s");
+        rollback(renamed, copied);
+        return;
+    }
+    // Watchdog-Schleife: überwacht das Insurgency-Process
+    if let Some(pid) = game_pid {
+        let pid = Pid::from_u32(pid); // sysinfo benötigt Pid-Typ
 
-    println!("[*] waiting for process exit, total attached: {}s", start_time.elapsed().as_secs());
-    let _ = child.wait();
-    println!("[+] process exited");
+        println!("[*] Monitoring Insurgency process...");
 
-    rollback(renamed, copied);
+        loop {
+        // Prozesse aktualisieren
+        sys.refresh_specifics(RefreshKind::everything());
+
+        // Prüfen, ob der Prozess noch existiert
+        if sys.process(pid).is_none() {
+            println!("[!] Insurgency has exited or lost connection, performing rollback...");
+            rollback(renamed, copied);
+            println!("[*] Exiting script.");
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
 }
 
 fn rollback(renamed: bool, copied: bool) {
     println!("[*] rollback");
-    if copied {
-        let _ = fs::remove_file("InsurgencyEAC.exe");
-        let __ = fs::remove_file("InsurgencyVR.exe.lnk");
-        println!("    removed InsurgencyEAC.exe");
-    }
-    if renamed {
-        let _ = fs::rename("InsurgencyEACg.exe", "InsurgencyEAC.exe");
-        println!("    restored InsurgencyEAC.exe");
-    }
-    println!("[*] rollback done");
+    let _ = fs::rename("InsurgencyEAC.exe", "DELETE.exe");
+    let _ = fs::rename("InsurgencyEACg.exe", "InsurgencyEAC.exe");
+    let _ = fs::remove_file("DELETE.exe");
+    let __ = fs::remove_file("InsurgencyVR.exe.lnk");
+
+    println!("    removed InsurgencyEAC.exe");
+    println!("    restored InsurgencyEAC.exe from archive");
+    println!("[*] rollback finished");
 }
 
 pub fn create_and_copy_shortcut() -> windows::core::Result<PathBuf> {
