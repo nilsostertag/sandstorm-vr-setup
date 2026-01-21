@@ -5,6 +5,7 @@ import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import shutil
+import webbrowser
 import winshell
 from win32com.client import Dispatch
 
@@ -110,19 +111,26 @@ def install():
         messagebox.showerror("Installation failed", str(e))
 
 def get_embedded_rust_exe():
-    if hasattr(sys, "_MEIPASS"):
-        base = sys._MEIPASS  # PyInstaller
-        return os.path.join(base, "payload", "sandstorm-vr-setup.exe")
+    if getattr(sys, 'frozen', False):
+        # PyInstaller EXE
+        path = os.path.join(os.path.dirname(sys.executable), "sandstorm-vr-setup.exe")
+        print(path)
+        return path 
     else:
-        return os.path.join(os.path.dirname(__file__), "sandstorm-vr-setup.exe")
+        # Normales Python-Skript
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sandstorm-vr-setup.exe")
+        print(path)
+        return path
 
 
 def install_rust_binary(install_dir):
     src = get_embedded_rust_exe()
+    #print(f"src: {src}")
     dst = os.path.join(install_dir, "sandstorm-vr-setup.exe")
+    #print(f"dst: {dst}")
 
     if not os.path.exists(src):
-        messagebox.showerror("Installer Error", "sandstorm-vr-setup.exe not found.")
+        messagebox.showerror("Installer Error", f"sandstorm-vr-setup.exe not found in {src}.")
         sys.exit(1)
 
     shutil.copy2(src, dst)
@@ -158,9 +166,13 @@ tk.Label(root, text="Insurgency Sandstorm Directory (Your Steam Install):").pack
 tk.Entry(root, textvariable=sandstorm_dir_var, width=65, state="readonly").pack()
 tk.Button(root, text="Browse", command=select_sandstorm_dir).pack(pady=5)
 
-tk.Label(root, text="UEVRInjector executable path \n(Download here: https://github.com/praydog/UEVR/releases/tag/1.05):").pack(pady=(10, 0))
+tk.Label(root, text="UEVRInjector executable path(GitHub: https://github.com/praydog/UEVR/releases/tag/1.05):").pack(pady=(10, 0))
 tk.Entry(root, textvariable=uevr_path_var, width=65, state="readonly").pack()
 tk.Button(root, text="Browse", command=select_uevr_path).pack(pady=5)
+link = tk.Label(root, text="Quick Install via GitHub",font=('Helveticabold', 15), fg="blue", cursor="hand2")
+link.pack()
+link.bind("<Button-1>", lambda e:
+webbrowser.open_new_tab("https://github.com/praydog/UEVR/releases/tag/1.05"))
 
 tk.Button(
     root,
